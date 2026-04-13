@@ -3,7 +3,16 @@
 Pipeline complet pour le déploiement automatisé et la mise
 en conformité ANSSI BP-028 de machines virtuelles Debian 12 sur
 Proxmox VE.
+<div align="center">
+  
+![Proxmox VE](https://img.shields.io/badge/Proxmox_VE-E57000?style=for-the-badge&logo=proxmox&logoColor=white)
+![Packer](https://img.shields.io/badge/Packer-02A8EF?style=for-the-badge&logo=packer&logoColor=white)
+![Terraform](https://img.shields.io/badge/Terraform-844FBA?style=for-the-badge&logo=terraform&logoColor=white)
+![Ansible](https://img.shields.io/badge/Ansible-EE0000?style=for-the-badge&logo=ansible&logoColor=white)
+![GitHub Actions](https://img.shields.io/badge/GitHub_Actions-2088FF?style=for-the-badge&logo=github-actions&logoColor=white)
+![Debian](https://img.shields.io/badge/Debian-A81D33?style=for-the-badge&logo=debian&logoColor=white)
 
+</div>
 ## Architecture
 
 Packer → Terraform → Ansible + OpenSCAP → GitHub Actions
