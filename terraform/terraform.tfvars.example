@@ -1,0 +1,21 @@
+proxmox_endpoint  = "https://TON-IP:8006/"
+proxmox_api_token = "terraform@pve!terraform-token=TON-SECRET"
+proxmox_node      = "pve"
+
+template_vm_id    = 9000
+vm_id             = 100
+vm_name           = "debian-vm-01"
+vm_cores          = 1
+vm_memory         = 2048
+vm_disk_size      = 20
+vm_storage_pool   = "local-lvm"
+vm_bridge         = "vmbr1"
+vm_tags           = ["terraform", "debian-12"]
+
+ip_config_type    = "static"
+vm_ip_address     = "10.10.0.10/24"
+vm_gateway        = "10.10.0.1"
+vm_dns            = "10.10.0.1"
+
+admin_username    = "packer"
+ssh_public_key    = "ssh-rsa AAAA... user@host"

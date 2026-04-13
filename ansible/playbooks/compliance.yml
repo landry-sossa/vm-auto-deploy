@@ -1,0 +1,324 @@
+# ============================================================
+# compliance.yml - Playbook principal
+# Projet  : proxmox-auto-deploy
+# Landry SOSSA 
+
+# Ordre d'exécution :
+#   1. Mise à jour système
+#   2. Installation OpenSCAP
+#   3. Scan initial ANSSI BP-028 minimal
+#   4. Remédiation automatique
+#   5. Scan final — vérification du score
+#   6. Récupération du rapport HTML
+#   7. Nettoyage — suppression user packer + cloud-init
+# ============================================================
+
+---
+- name: Conformité ANSSI BP-028 — Debian 12
+  hosts: debian_vms
+  become: true
+  gather_facts: true
+
+  vars:
+    # Profil ANSSI choisi — minimal pour commencer
+    # Options : anssi_bp28_minimal | anssi_bp28_intermediary
+    #           anssi_bp28_enhanced | anssi_bp28_high
+    anssi_profile: "xccdf_org.ssgproject.content_profile_anssi_bp28_minimal"
+
+    # Version ComplianceAsCode utilisée
+    ssg_version: "0.1.80"
+
+    # Fichier de politique OpenSCAP pour Debian 12
+    scap_datastream: "/usr/share/xml/scap/ssg/content/ssg-debian12-ds.xml"
+
+    # Répertoire des rapports sur la VM
+    report_dir: "/var/log/openscap-reports"
+
+    # Nom des fichiers de rapport
+    report_date:    "{{ now(fmt='%Y-%m-%d') }}"
+    report_initial: "{{ report_dir }}/rapport-initial-{{ report_date }}.html"
+    report_arf:     "{{ report_dir }}/rapport-arf-{{ report_date }}.xml"
+    report_final:   "{{ report_dir }}/rapport-final-{{ report_date }}.html"
+
+  tasks:
+
+    # --------------------------------------------------------
+    # ÉTAPE 1 — Mise à jour système
+    # --------------------------------------------------------
+    - name: "1/7 | Mise à jour des paquets"
+      apt:
+        update_cache: true
+        upgrade:      safe
+        cache_valid_time: 3600
+
+    # --------------------------------------------------------
+    # ÉTAPE 2 — Installation OpenSCAP + contenu ANSSI Debian 12
+    # Le paquet ssg-debian des dépôts officiels ne contient
+    # que Debian 10 et 11 — on télécharge depuis ComplianceAsCode
+    # --------------------------------------------------------
+    - name: "2/7 | Installation OpenSCAP et outils nécessaires"
+      apt:
+        name:
+          - openscap-scanner
+          - openscap-utils
+          - unzip
+          - wget
+        state: present
+
+    - name: "2/7 | Création du répertoire de rapports"
+      file:
+        path:  "{{ report_dir }}"
+        state: directory
+        mode:  "0755"
+
+    - name: "2/7 | Création du répertoire de politique SCAP"
+      file:
+        path:  "/usr/share/xml/scap/ssg/content"
+        state: directory
+        mode:  "0755"
+
+    - name: "2/7 | Installation Ansible "
+      apt:
+        name:
+          - ansible
+          - python3-pip
+        state: present
+
+    - name: "2/7 | Téléchargement contenu SCAP Debian 12 depuis ComplianceAsCode"
+      get_url:
+        url:  "https://github.com/ComplianceAsCode/content/releases/download/v{{ ssg_version }}/scap-security-guide-{{ ssg_version }}.zip"
+        dest: "/tmp/ssg.zip"
+        mode: "0644"
+
+    - name: "2/7 | Extraction de l'archive"
+      unarchive:
+        src:        /tmp/ssg.zip
+        dest:       /tmp/
+        remote_src: true
+        creates:    "/tmp/scap-security-guide-{{ ssg_version }}"
+
+    - name: "2/7 | Copie du fichier de politique Debian 12"
+      copy:
+        src:        "/tmp/scap-security-guide-{{ ssg_version }}/ssg-debian12-ds.xml"
+        dest:       "{{ scap_datastream }}"
+        remote_src: true
+        mode:       "0644"
+
+    - name: "2/7 | Vérification du fichier de politique"
+      stat:
+        path: "{{ scap_datastream }}"
+      register: scap_file
+
+    - name: "2/7 | Échec si fichier de politique absent"
+      fail:
+        msg: "Fichier SCAP introuvable : {{ scap_datastream }}"
+      when: not scap_file.stat.exists
+
+    # --------------------------------------------------------
+    # ÉTAPE 3 — Scan initial avant remédiation
+    # --------------------------------------------------------
+    - name: "3/7 | Scan initial ANSSI BP-028"
+      command: >
+        oscap xccdf eval
+        --profile {{ anssi_profile }}
+        --results-arf {{ report_arf }}
+        --report {{ report_initial }}
+        {{ scap_datastream }}
+      register:     scan_initial
+      failed_when:  scan_initial.rc > 2
+      # rc=0 → tout pass | rc=1 → erreur | rc=2 → des règles fail — normal
+
+    - name: "3/7 | Vérification que le fichier ARF a été créé"
+      stat:
+        path: "{{ report_arf }}"
+      register: arf_file
+
+    - name: "3/7 | Échec si ARF absent"
+      fail:
+        msg: "Le fichier ARF n'a pas été généré — le scan a échoué"
+      when: not arf_file.stat.exists
+
+    - name: "3/7 | Score initial"
+      debug:
+        msg: "Scan initial terminé — rapport : {{ report_initial }}"
+
+    # --------------------------------------------------------
+    # ÉTAPE 4 — Remédiation automatique depuis les résultats
+    # --------------------------------------------------------
+    - name: "4/7 | Génération du playbook de remédiation"
+      command: >
+        oscap xccdf generate fix
+        --fetch-remote-resources
+        --fix-type ansible
+        --result-id ""
+        --output {{ report_dir }}/remediation.yml
+        {{ report_arf }}
+      register:    remediation_gen
+      failed_when: remediation_gen.rc != 0
+
+    - name: "4/7 | Application de la remédiation Ansible"
+      command: >
+        ansible-playbook
+        -i "localhost,"
+        -c local
+        {{ report_dir }}/remediation.yml
+      register:    remediation_apply
+      failed_when: remediation_apply.rc != 0
+
+# --------------------------------------------------------
+    # ÉTAPE 4.5 — Remédiation Manuelle Sécurisée (Authentification & PAM)
+    # --------------------------------------------------------
+    - name: "4.5/7 | Installer les modules PAM supplémentaires (pwquality)"
+      apt:
+        name: libpam-pwquality
+        state: present
+
+    - name: "4.5/7 | Forcer l'algorithme de hachage et l'âge du mot de passe root"
+      lineinfile:
+        dest: /etc/login.defs
+        regexp: "{{ item.regexp }}"
+        line: "{{ item.line }}"
+      loop:
+        - { regexp: '^ENCRYPT_METHOD', line: 'ENCRYPT_METHOD SHA512' }
+        - { regexp: '^PASS_MAX_DAYS', line: 'PASS_MAX_DAYS 90' }
+        - { regexp: '^SHA_CRYPT_MIN_ROUNDS', line: 'SHA_CRYPT_MIN_ROUNDS 5000' }
+
+    - name: "4.5/7 | Appliquer la durée de vie maximale au compte root existant"
+      command: chage -M 90 root
+      changed_when: false
+
+    - name: "4.5/7 | Configurer faillock.conf (Remédiation ANSSI furtive)"
+      lineinfile:
+        path: /etc/security/faillock.conf
+        regexp: "{{ item.regexp }}"
+        line: "{{ item.line }}"
+      loop:
+        # On cherche la ligne (même commentée) et on la remplace proprement
+        - { regexp: '^\s*#?\s*deny\s*=', line: 'deny = 3' }
+        - { regexp: '^\s*#?\s*unlock_time\s*=', line: 'unlock_time = 900' }
+        - { regexp: '^\s*#?\s*even_deny_root', line: 'even_deny_root' }
+        - { regexp: '^\s*#?\s*root_unlock_time\s*=', line: 'root_unlock_time = 60' }
+
+    - name: "4.5/7 | Créer le profil PAM Debian COMPLET pour faillock"
+      copy:
+        dest: /usr/share/pam-configs/faillock
+        content: |
+          Name: Enforce failed login lockout
+          Default: yes
+          Priority: 256
+          Auth-Type: Primary
+          Auth-Initial:
+              required      pam_faillock.so preauth silent
+          Auth:
+              [default=die] pam_faillock.so authfail
+              sufficient    pam_faillock.so authsucc
+          Account-Type: Primary
+          Account:
+              required      pam_faillock.so
+        mode: '0644'
+
+    - name: "4.5/7 | Activer la configuration PAM"
+      command: pam-auth-update --enable faillock
+      environment:
+        DEBIAN_FRONTEND: noninteractive
+      changed_when: false
+
+
+    - name: "4.5/7 | SCAP FIX : Forcer les arguments stricts sur preauth"
+      lineinfile:
+        path: /etc/pam.d/common-auth
+        regexp: '^\s*auth\s+required\s+pam_faillock\.so\s+preauth.*'
+        line: 'auth    required        pam_faillock.so preauth silent deny=3 fail_interval=900 unlock_time=900 even_deny_root root_unlock_time=60'
+        backrefs: no
+
+    - name: "4.5/7 | SCAP FIX : Forcer les arguments stricts sur authfail"
+      lineinfile:
+        path: /etc/pam.d/common-auth
+        regexp: '^\s*auth\s+\[default=die\]\s+pam_faillock\.so\s+authfail.*'
+        line: 'auth    [default=die]   pam_faillock.so authfail deny=3 fail_interval=900 unlock_time=900 even_deny_root root_unlock_time=60'
+        backrefs: no
+    # --------------------------------------------------------
+    # ÉTAPE 5 — Scan final après remédiation
+    # --------------------------------------------------------
+    - name: "5/7 | Pause pour stabilisation après remédiation"
+      wait_for:
+        timeout: 15
+
+    - name: "5/7 | Scan final ANSSI BP-028"
+      command: >
+        oscap xccdf eval
+        --profile {{ anssi_profile }}
+        --results-arf {{ report_dir }}/rapport-arf-final-{{ report_date }}.xml
+        --report {{ report_final }}
+        {{ scap_datastream }}
+      register:    scan_final
+      failed_when: scan_final.rc > 2
+
+    - name: "5/7 | Vérification que le rapport final a été créé"
+      stat:
+        path: "{{ report_final }}"
+      register: final_file
+
+    - name: "5/7 | Échec si rapport final absent"
+      fail:
+        msg: "Le rapport final n'a pas été généré — rc={{ scan_final.rc }}"
+      when: not final_file.stat.exists
+
+    - name: "5/7 | Scan final terminé"
+      debug:
+        msg: "Rapport final disponible : {{ report_final }}"
+
+    # --------------------------------------------------------
+    # ÉTAPE 6 — Récupération des rapports sur la machine locale
+    # --------------------------------------------------------
+   # --------------------------------------------------------
+    # ÉTAPE 6 — Récupération des rapports sur la machine locale
+    # --------------------------------------------------------
+    - name: "6/7 | Récupération rapport initial"
+      fetch:
+        src:  "{{ report_initial }}"
+        dest: "{{ playbook_dir }}/../reports/{{ inventory_hostname }}-initial-{{ report_date }}.html"
+        flat: true
+
+    - name: "6/7 | Récupération rapport final"
+      fetch:
+        src:  "{{ report_final }}"
+        dest: "{{ playbook_dir }}/../reports/{{ inventory_hostname }}-final-{{ report_date }}.html"
+        flat: true
+
+    # --------------------------------------------------------
+    # ÉTAPE 7 — Nettoyage final
+    # Ordre important : cloud-init d'abord, packer en dernier
+    # --------------------------------------------------------
+    - name: "7/7 | Arrêt des services cloud-init"
+      systemd:
+        name:    "{{ item }}"
+        state:   stopped
+        enabled: false
+      loop:
+        - cloud-init
+        - cloud-init-local
+        - cloud-config
+        - cloud-final
+      ignore_errors: true
+
+    - name: "7/7 | Désinstallation cloud-init"
+      apt:
+        name:   cloud-init
+        state:  absent
+        purge:  true
+
+    - name: "7/7 | Suppression répertoires cloud-init"
+      file:
+        path:  "{{ item }}"
+        state: absent
+      loop:
+        - /etc/cloud
+        - /var/lib/cloud
+
+    # - name: "7/7 | Suppression user packer — DERNIÈRE TÂCHE"
+    #   user:
+    #     name:   packer
+    #     state:  absent
+    #     remove: true
+      # Cette tâche coupe la connexion SSH — doit être la dernière

@@ -1,0 +1,504 @@
+# ============================================================
+# build.yml — Pipeline CI/CD complet
+# Projet  : proxmox-auto-deploy
+#
+# Déclencheurs :
+#   - Push sur main        → pipeline complet
+#   - workflow_dispatch    → lancement manuel avec paramètres
+#
+# Jobs :
+#   0. load-config         → lit pipeline/config.yml
+#   1. packer-build        → construit la golden image
+#   2. terraform-deploy    → déploie la VM depuis le template
+#   3. ansible-compliance  → applique conformité ANSSI BP-028
+#   4. report              → résumé du pipeline
+#
+# Secrets requis dans GitHub Settings → Secrets → Actions :
+#   PROXMOX_URL            → URL de l'API Proxmox
+#   PROXMOX_USERNAME       → user@realm!token-id
+#   PROXMOX_TOKEN          → secret du token Packer
+#   TERRAFORM_API_TOKEN    → user@realm!token-id=secret
+#   ISO_CHECKSUM           → sha512:checksum
+#   PACKER_SSH_PUBLIC_KEY  → contenu de packer_id_rsa.pub
+#   PACKER_SSH_PRIVATE_KEY → contenu de packer_id_rsa
+
+# ============================================================
+
+name: "Pipeline Proxmox Auto Deploy"
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "packer/**"
+      - "terraform/**"
+      - "ansible/**"
+      - "pipeline/**"
+      - ".github/workflows/**"
+
+  workflow_dispatch:
+    inputs:
+      run_packer:
+        description: "Rebuilder le template Packer ?"
+        required: true
+        type: boolean
+        default: false
+
+# Empêche deux pipelines de tourner en même temps
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  PACKER_DIR:    "./packer/debian"
+  TERRAFORM_DIR: "./terraform"
+  ANSIBLE_DIR:   "./ansible"
+  CONFIG_FILE:   "./pipeline/config.yml"
+
+jobs:
+
+  # ============================================================
+  # JOB 0 — CHARGEMENT DE LA CONFIGURATION
+  # Lit pipeline/config.yml et expose les valeurs
+  # pour tous les jobs suivants via outputs
+  # ============================================================
+  load-config:
+    name: " Chargement configuration"
+    runs-on: self-hosted
+
+    outputs:
+      # Proxmox
+      proxmox_node:     ${{ steps.config.outputs.proxmox_node }}
+      proxmox_ip:       ${{ steps.config.outputs.proxmox_ip }}
+      proxmox_storage:  ${{ steps.config.outputs.proxmox_storage }}
+      bridge_build:     ${{ steps.config.outputs.bridge_build }}
+      bridge_deploy:    ${{ steps.config.outputs.bridge_deploy }}
+      # Packer
+      packer_vm_id:     ${{ steps.config.outputs.packer_vm_id }}
+      packer_vm_name:   ${{ steps.config.outputs.packer_vm_name }}
+      packer_vm_cores:  ${{ steps.config.outputs.packer_vm_cores }}
+      packer_vm_memory: ${{ steps.config.outputs.packer_vm_memory }}
+      packer_vm_disk:   ${{ steps.config.outputs.packer_vm_disk }}
+      packer_iso_file:  ${{ steps.config.outputs.packer_iso_file }}
+      packer_locale:    ${{ steps.config.outputs.packer_locale }}
+      packer_timezone:  ${{ steps.config.outputs.packer_timezone }}
+      packer_keyboard:  ${{ steps.config.outputs.packer_keyboard }}
+      packer_bind_address:  ${{ steps.config.outputs.packer_bind_address }}
+      # Terraform
+      tf_vm_id:         ${{ steps.config.outputs.tf_vm_id }}
+      tf_vm_name:       ${{ steps.config.outputs.tf_vm_name }}
+      tf_vm_cores:      ${{ steps.config.outputs.tf_vm_cores }}
+      tf_vm_memory:     ${{ steps.config.outputs.tf_vm_memory }}
+      tf_vm_disk:       ${{ steps.config.outputs.tf_vm_disk }}
+      tf_vm_ip:         ${{ steps.config.outputs.tf_vm_ip }}
+      tf_vm_gateway:    ${{ steps.config.outputs.tf_vm_gateway }}
+      tf_vm_dns:        ${{ steps.config.outputs.tf_vm_dns }}
+      # Ansible
+      anssi_profile:    ${{ steps.config.outputs.anssi_profile }}
+      ssg_version:      ${{ steps.config.outputs.ssg_version }}
+
+    steps:
+      - name: "Checkout du code"
+        uses: actions/checkout@v4
+
+      - name: "Installation yq"
+        run: |
+          if ! command -v yq &> /dev/null; then
+            sudo wget -qO /usr/local/bin/yq \
+              https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
+            sudo chmod +x /usr/local/bin/yq
+          fi
+          yq --version
+
+      - name: "Vérification que config.yml existe"
+        run: |
+          if [ ! -f "${{ env.CONFIG_FILE }}" ]; then
+            echo " Fichier pipeline/config.yml introuvable"
+            echo "   Copier pipeline/config.yml.example → pipeline/config.yml"
+            echo "   et remplir avec tes valeurs"
+            exit 1
+          fi
+          echo "✓ config.yml trouvé"
+
+      - name: "Lecture de config.yml"
+        id: config
+        run: |
+          # Proxmox
+          echo "proxmox_node=$(yq '.proxmox.node' ${{ env.CONFIG_FILE }})"         >> $GITHUB_OUTPUT
+          echo "proxmox_ip=$(yq '.proxmox.ip' ${{ env.CONFIG_FILE }})"             >> $GITHUB_OUTPUT
+          echo "proxmox_storage=$(yq '.proxmox.storage' ${{ env.CONFIG_FILE }})"   >> $GITHUB_OUTPUT
+          echo "bridge_build=$(yq '.proxmox.bridge_build' ${{ env.CONFIG_FILE }})" >> $GITHUB_OUTPUT
+          echo "bridge_deploy=$(yq '.proxmox.bridge_deploy' ${{ env.CONFIG_FILE }})" >> $GITHUB_OUTPUT
+          # Packer
+          echo "packer_vm_id=$(yq '.packer.vm_id' ${{ env.CONFIG_FILE }})"         >> $GITHUB_OUTPUT
+          echo "packer_vm_name=$(yq '.packer.vm_name' ${{ env.CONFIG_FILE }})"     >> $GITHUB_OUTPUT
+          echo "packer_vm_cores=$(yq '.packer.vm_cores' ${{ env.CONFIG_FILE }})"   >> $GITHUB_OUTPUT
+          echo "packer_vm_memory=$(yq '.packer.vm_memory' ${{ env.CONFIG_FILE }})" >> $GITHUB_OUTPUT
+          echo "packer_bind_address=$(yq '.packer.bind_address' ${{ env.CONFIG_FILE }})" >> $GITHUB_OUTPUT
+          echo "packer_vm_disk=$(yq '.packer.vm_disk' ${{ env.CONFIG_FILE }})"     >> $GITHUB_OUTPUT
+          echo "packer_iso_file=$(yq '.packer.iso_file' ${{ env.CONFIG_FILE }})"   >> $GITHUB_OUTPUT
+          echo "packer_locale=$(yq '.packer.locale' ${{ env.CONFIG_FILE }})"       >> $GITHUB_OUTPUT
+          echo "packer_timezone=$(yq '.packer.timezone' ${{ env.CONFIG_FILE }})"   >> $GITHUB_OUTPUT
+          echo "packer_keyboard=$(yq '.packer.keyboard' ${{ env.CONFIG_FILE }})"   >> $GITHUB_OUTPUT
+          # Terraform
+          echo "tf_vm_id=$(yq '.terraform.vm_id' ${{ env.CONFIG_FILE }})"          >> $GITHUB_OUTPUT
+          echo "tf_vm_name=$(yq '.terraform.vm_name' ${{ env.CONFIG_FILE }})"      >> $GITHUB_OUTPUT
+          echo "tf_vm_cores=$(yq '.terraform.vm_cores' ${{ env.CONFIG_FILE }})"    >> $GITHUB_OUTPUT
+          echo "tf_vm_memory=$(yq '.terraform.vm_memory' ${{ env.CONFIG_FILE }})"  >> $GITHUB_OUTPUT
+          echo "tf_vm_disk=$(yq '.terraform.vm_disk' ${{ env.CONFIG_FILE }})"      >> $GITHUB_OUTPUT
+          echo "tf_vm_ip=$(yq '.terraform.vm_ip' ${{ env.CONFIG_FILE }})"          >> $GITHUB_OUTPUT
+          echo "tf_vm_gateway=$(yq '.terraform.vm_gateway' ${{ env.CONFIG_FILE }})" >> $GITHUB_OUTPUT
+          echo "tf_vm_dns=$(yq '.terraform.vm_dns' ${{ env.CONFIG_FILE }})"        >> $GITHUB_OUTPUT
+          # Ansible
+          echo "anssi_profile=$(yq '.ansible.anssi_profile' ${{ env.CONFIG_FILE }})" >> $GITHUB_OUTPUT
+          echo "ssg_version=$(yq '.ansible.ssg_version' ${{ env.CONFIG_FILE }})"   >> $GITHUB_OUTPUT
+
+      - name: "Affichage de la configuration chargée"
+        run: |
+          echo "============================================"
+          echo "  CONFIGURATION CHARGÉE"
+          echo "============================================"
+          echo "Proxmox node    : ${{ steps.config.outputs.proxmox_node }}"
+          echo "Proxmox ip    : ${{ steps.config.outputs.proxmox_ip }}"
+          echo "Storage         : ${{ steps.config.outputs.proxmox_storage }}"
+          echo "Bridge build    : ${{ steps.config.outputs.bridge_build }}"
+          echo "Bridge deploy   : ${{ steps.config.outputs.bridge_deploy }}"
+          echo "--------------------------------------------"
+          echo "Packer VM ID    : ${{ steps.config.outputs.packer_vm_id }}"
+          echo "Packer VM name  : ${{ steps.config.outputs.packer_vm_name }}"
+          echo "Packer bind address    : ${{ steps.config.outputs.packer_bind_address }}"
+          echo "ISO file        : ${{ steps.config.outputs.packer_iso_file }}"
+          echo "--------------------------------------------"
+          echo "Terraform VM    : ${{ steps.config.outputs.tf_vm_name }}"
+          echo "VM IP           : ${{ steps.config.outputs.tf_vm_ip }}"
+          echo "VM Gateway      : ${{ steps.config.outputs.tf_vm_gateway }}"
+          echo "--------------------------------------------"
+          echo "ANSSI profile   : ${{ steps.config.outputs.anssi_profile }}"
+          echo "SSG version     : ${{ steps.config.outputs.ssg_version }}"
+          echo "============================================"
+
+  # ============================================================
+  # JOB 1 — PACKER BUILD
+  # Construit la golden image Debian 12
+  # Ne tourne que si :
+  #   - des fichiers packer/ ont changé
+  #   - ou si run_packer=true en manuel
+  # ============================================================
+  packer-build:
+    name: " Packer Golden Image"
+    runs-on: self-hosted
+    needs: load-config
+    # if: |
+    #   github.event_name == 'workflow_dispatch' && inputs.run_packer == true ||
+    #   github.event_name == 'push' && contains(join(github.event.commits.*.modified, ','), 'packer/')
+
+    steps:
+      - name: "Checkout du code"
+        uses: actions/checkout@v4
+
+      - name: "Installation Packer"
+        run: |
+          if ! command -v packer &> /dev/null; then
+            wget -O- https://apt.releases.hashicorp.com/gpg | \
+              sudo gpg --dearmor -o /usr/share/keyrings/hashicorp-archive-keyring.gpg
+            echo "deb [signed-by=/usr/share/keyrings/hashicorp-archive-keyring.gpg] \
+              https://apt.releases.hashicorp.com $(lsb_release -cs) main" | \
+              sudo tee /etc/apt/sources.list.d/hashicorp.list
+            sudo apt-get update && sudo apt-get install -y packer
+          fi
+          packer version
+
+      - name: "Configuration de la clé SSH"
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.PACKER_SSH_PRIVATE_KEY }}" > ~/.ssh/packer_id_rsa
+          chmod 600 ~/.ssh/packer_id_rsa
+
+      - name: "Packer init téléchargement du plugin proxmox"
+        working-directory: ${{ env.PACKER_DIR }}
+        run: packer init .
+
+      - name: "Packer validate vérification de la configuration"
+        working-directory: ${{ env.PACKER_DIR }}
+        run: |
+          packer validate \
+            -var="proxmox_url=${{ secrets.PROXMOX_URL }}" \
+            -var="proxmox_username=${{ secrets.PROXMOX_USERNAME }}" \
+            -var="proxmox_token=${{ secrets.PROXMOX_TOKEN }}" \
+            -var="proxmox_node=${{ needs.load-config.outputs.proxmox_node }}" \
+            -var="vm_id=${{ needs.load-config.outputs.packer_vm_id }}" \
+            -var="vm_name=${{ needs.load-config.outputs.packer_vm_name }}" \
+            -var="vm_cores=${{ needs.load-config.outputs.packer_vm_cores }}" \
+            -var="vm_memory=${{ needs.load-config.outputs.packer_vm_memory }}" \
+            -var="vm_disk_size=${{ needs.load-config.outputs.packer_vm_disk }}" \
+            -var="vm_storage_pool=${{ needs.load-config.outputs.proxmox_storage }}" \
+            -var="vm_bridge=${{ needs.load-config.outputs.bridge_build }}" \
+            -var="iso_file=${{ needs.load-config.outputs.packer_iso_file }}" \
+            -var="iso_checksum=${{ secrets.ISO_CHECKSUM }}" \
+            -var="locale=${{ needs.load-config.outputs.packer_locale }}" \
+            -var="timezone=${{ needs.load-config.outputs.packer_timezone }}" \
+            -var="keyboard=${{ needs.load-config.outputs.packer_keyboard }}" \
+            -var="ssh_username=packer" \
+            -var="ssh_public_key=${{ secrets.PACKER_SSH_PUBLIC_KEY }}" \
+            -var="bind_address=${{ needs.load-config.outputs.packer_bind_address }}" \
+            debian.pkr.hcl
+
+      - name: "Packer build construction de la golden image"
+        working-directory: ${{ env.PACKER_DIR }}
+        run: |
+          packer build \
+            -var="proxmox_url=${{ secrets.PROXMOX_URL }}" \
+            -var="proxmox_username=${{ secrets.PROXMOX_USERNAME }}" \
+            -var="proxmox_token=${{ secrets.PROXMOX_TOKEN }}" \
+            -var="proxmox_node=${{ needs.load-config.outputs.proxmox_node }}" \
+            -var="vm_id=${{ needs.load-config.outputs.packer_vm_id }}" \
+            -var="vm_name=${{ needs.load-config.outputs.packer_vm_name }}" \
+            -var="vm_cores=${{ needs.load-config.outputs.packer_vm_cores }}" \
+            -var="vm_memory=${{ needs.load-config.outputs.packer_vm_memory }}" \
+            -var="vm_disk_size=${{ needs.load-config.outputs.packer_vm_disk }}" \
+            -var="vm_storage_pool=${{ needs.load-config.outputs.proxmox_storage }}" \
+            -var="vm_bridge=${{ needs.load-config.outputs.bridge_build }}" \
+            -var="iso_file=${{ needs.load-config.outputs.packer_iso_file }}" \
+            -var="iso_checksum=${{ secrets.ISO_CHECKSUM }}" \
+            -var="locale=${{ needs.load-config.outputs.packer_locale }}" \
+            -var="timezone=${{ needs.load-config.outputs.packer_timezone }}" \
+            -var="keyboard=${{ needs.load-config.outputs.packer_keyboard }}" \
+            -var="ssh_username=packer" \
+            -var="ssh_public_key=${{ secrets.PACKER_SSH_PUBLIC_KEY }}" \
+            -var="bind_address=${{ needs.load-config.outputs.packer_bind_address }}" \
+            debian.pkr.hcl
+
+      - name: "Nettoyage de la clé SSH"
+        if: always()
+        run: rm -f ~/.ssh/packer_id_rsa
+
+  # ============================================================
+  # JOB 2 — TERRAFORM DEPLOY
+  # Déploie une VM depuis le template Packer
+  # ============================================================
+  terraform-deploy:
+    name: " Terraform Déploiement VM"
+    runs-on: self-hosted
+    needs: [load-config, packer-build]
+    if: always() && !failure() && !cancelled()
+
+    outputs:
+      vm_ip: ${{ steps.get_ip.outputs.vm_ip }}
+
+    steps:
+      - name: "Checkout du code"
+        uses: actions/checkout@v4
+
+      - name: "Installation Terraform"
+        run: |
+          if ! command -v terraform &> /dev/null; then
+            wget -O- https://apt.releases.hashicorp.com/gpg | \
+              sudo gpg --dearmor -o /usr/share/keyrings/hashicorp-archive-keyring.gpg
+            echo "deb [signed-by=/usr/share/keyrings/hashicorp-archive-keyring.gpg] \
+              https://apt.releases.hashicorp.com $(lsb_release -cs) main" | \
+              sudo tee /etc/apt/sources.list.d/hashicorp.list
+            sudo apt-get update && sudo apt-get install -y terraform
+          fi
+          terraform version
+
+      - name: "Terraform init"
+        working-directory: ${{ env.TERRAFORM_DIR }}
+        run: terraform init
+
+      - name: "Terraform plan"
+        working-directory: ${{ env.TERRAFORM_DIR }}
+        run: |
+          terraform plan \
+            -var="proxmox_endpoint=${{ secrets.PROXMOX_URL }}" \
+            -var="proxmox_api_token=${{ secrets.TERRAFORM_API_TOKEN }}" \
+            -var="proxmox_node=${{ needs.load-config.outputs.proxmox_node }}" \
+            -var="proxmox_ip=${{ needs.load-config.outputs.proxmox_ip }}" \
+            -var="template_vm_id=${{ needs.load-config.outputs.packer_vm_id }}" \
+            -var="vm_id=${{ needs.load-config.outputs.tf_vm_id }}" \
+            -var="vm_name=${{ needs.load-config.outputs.tf_vm_name }}" \
+            -var="vm_cores=${{ needs.load-config.outputs.tf_vm_cores }}" \
+            -var="vm_memory=${{ needs.load-config.outputs.tf_vm_memory }}" \
+            -var="vm_disk_size=${{ needs.load-config.outputs.tf_vm_disk }}" \
+            -var="vm_storage_pool=${{ needs.load-config.outputs.proxmox_storage }}" \
+            -var="vm_bridge=${{ needs.load-config.outputs.bridge_deploy }}" \
+            -var="ip_config_type=static" \
+            -var="vm_ip_address=${{ needs.load-config.outputs.tf_vm_ip }}" \
+            -var="vm_gateway=${{ needs.load-config.outputs.tf_vm_gateway }}" \
+            -var="vm_dns=${{ needs.load-config.outputs.tf_vm_dns }}" \
+            -var="admin_username=packer" \
+            -var="ssh_public_key=${{ secrets.PACKER_SSH_PUBLIC_KEY }}" \
+            -out=tfplan
+
+      - name: "Terraform apply"
+        working-directory: ${{ env.TERRAFORM_DIR }}
+        run: terraform apply auto-approve tfplan
+
+      - name: "Récupération de l'IP de la VM"
+        id: get_ip
+        working-directory: ${{ env.TERRAFORM_DIR }}
+        run: |
+          VM_IP=$(terraform output -raw vm_ip_address | cut -d'/' -f1)
+          echo "vm_ip=$VM_IP" >> $GITHUB_OUTPUT
+          echo "✓ VM déployée à l'IP : $VM_IP"
+ 
+      - name: "Attente SSH disponible sur la VM"
+        run: |
+          VM_IP="${{ steps.get_ip.outputs.vm_ip }}"
+          mkdir -p ~/.ssh
+          echo "${{ secrets.PACKER_SSH_PRIVATE_KEY }}" > ~/.ssh/packer_id_rsa
+          chmod 700 ~/.ssh/packer_id_rsa
+          echo "Attente SSH sur $VM_IP..."
+          for i in $(seq 1 10); do
+            if ssh -v -o StrictHostKeyChecking=no \
+                   -o ConnectTimeout=5 \
+                   -i ~/.ssh/packer_id_rsa \
+                   packer@$VM_IP "echo ok" 2>/dev/null; then
+              echo "✓ SSH disponible"
+              exit 0
+            fi
+            echo "Tentative $i/30  attente 10s..."
+            sleep 10
+          done
+          echo " SSH non disponible après 5 minutes"
+          exit 1
+
+      - name: "Nettoyage"
+        if: always()
+        working-directory: ${{ env.TERRAFORM_DIR }}
+        run: |
+          rm -f tfplan
+          rm -f ~/.ssh/packer_id_rsa
+
+  # ============================================================
+  # JOB 3 — ANSIBLE COMPLIANCE
+  # Applique la conformité ANSSI BP-028 + génère les rapports
+  # ============================================================
+  ansible-compliance:
+    name: " Ansible Conformité ANSSI BP-028"
+    runs-on: self-hosted
+    needs: [load-config, terraform-deploy]
+    if: success()
+
+    steps:
+      - name: "Checkout du code"
+        uses: actions/checkout@v4
+
+      - name: "Installation Ansible"
+        run: |
+          if ! command -v ansible &> /dev/null; then
+            sudo apt-get update
+            sudo apt-get install -y ansible
+          fi
+          ansible --version
+
+      - name: "Configuration de la clé SSH"
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.PACKER_SSH_PRIVATE_KEY }}" > ~/.ssh/packer_id_rsa
+          chmod 600 ~/.ssh/packer_id_rsa
+
+      - name: "Génération de l'inventory dynamique"
+        working-directory: ${{ env.ANSIBLE_DIR }}
+        run: |
+          VM_IP="${{ needs.terraform-deploy.outputs.vm_ip }}"
+          cat > inventory/hosts.yml << EOF
+          all:
+            vars:
+              ansible_user:                 packer
+              ansible_ssh_private_key_file: ~/.ssh/packer_id_rsa
+              ansible_ssh_common_args:      "-o StrictHostKeyChecking=no"
+              ansible_python_interpreter:   /usr/bin/python3
+            children:
+              debian_vms:
+                hosts:
+                  debian-vm-01:
+                    ansible_host: ${VM_IP}
+          EOF
+          echo "✓ Inventory généré pour IP : $VM_IP"
+
+      - name: "Test de connexion Ansible"
+        working-directory: ${{ env.ANSIBLE_DIR }}
+        run: ansible -i inventory/hosts.yml debian_vms -m ping
+
+      - name: "Mise à jour du profil ANSSI dans le playbook"
+        working-directory: ${{ env.ANSIBLE_DIR }}
+        run: |
+          # Injection dynamique du profil ANSSI et version SSG
+          sed -i "s|anssi_bp28_minimal|${{ needs.load-config.outputs.anssi_profile }}|g" \
+            playbooks/compliance.yml
+          sed -i "s|ssg_version: \"0.1.79\"|ssg_version: \"${{ needs.load-config.outputs.ssg_version }}\"|g" \
+            playbooks/compliance.yml
+
+      - name: "Lancement du playbook de conformité ANSSI"
+        working-directory: ${{ env.ANSIBLE_DIR }}
+        run: |
+          ansible-playbook \
+            -i inventory/hosts.yml \
+            playbooks/compliance.yml
+
+      - name: "Upload des rapports de conformité"
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: "rapports-conformite-anssi-${{ github.run_number }}"
+          path: "ansible/reports/*.html"
+          retention-days: 30
+
+      - name: "Nettoyage"
+        if: always()
+        run: rm -f ~/.ssh/packer_id_rsa
+
+  # ============================================================
+  # JOB 4 — RAPPORT FINAL
+  # Résumé complet du pipeline
+  # ============================================================
+  report:
+    name: " Rapport final"
+    runs-on: self-hosted
+    needs: [load-config, packer-build, terraform-deploy, ansible-compliance]
+    if: always()
+
+    steps:
+      - name: "Résumé du pipeline"
+        run: |
+          echo "============================================"
+          echo "  PIPELINE PROXMOX AUTO DEPLOY  RÉSUMÉ"
+          echo "============================================"
+          echo ""
+          echo "Run          : #${{ github.run_number }}"
+          echo "Branche      : ${{ github.ref_name }}"
+          echo "Déclenché par: ${{ github.actor }}"
+          echo "Date         : $(date '+%Y-%m-%d %H:%M:%S')"
+          echo ""
+          echo "CONFIGURATION :"
+          echo "  Proxmox node : ${{ needs.load-config.outputs.proxmox_node }}"
+          echo "  Template     : ${{ needs.load-config.outputs.packer_vm_name }}"
+          echo "  VM déployée  : ${{ needs.load-config.outputs.tf_vm_name }}"
+          echo "  VM IP        : ${{ needs.load-config.outputs.tf_vm_ip }}"
+          echo "  Profil ANSSI : ${{ needs.load-config.outputs.anssi_profile }}"
+          echo ""
+          echo "STATUTS :"
+          echo "   Config       : ${{ needs.load-config.result }}"
+          echo "   Packer       : ${{ needs.packer-build.result }}"
+          echo "   Terraform    : ${{ needs.terraform-deploy.result }}"
+          echo "   Ansible ANSSI: ${{ needs.ansible-compliance.result }}"
+          echo ""
+
+          # Statut global
+          if [ "${{ needs.ansible-compliance.result }}" == "success" ]; then
+            echo " PIPELINE RÉUSSI"
+            echo "   VM déployée et conforme ANSSI BP-028"
+            echo "   Rapport disponible dans les artifacts"
+          elif [ "${{ needs.ansible-compliance.result }}" == "skipped" ]; then
+            echo "  PIPELINE PARTIEL"
+            echo "   Certains jobs ont été skippés"
+          else
+            echo " PIPELINE ÉCHOUÉ"
+            echo "   Vérifier les logs ci-dessus"
+          fi
+          echo "============================================"
+
+      - name: "Statut final"
+        if: needs.ansible-compliance.result == 'failure'
+        run: exit 1

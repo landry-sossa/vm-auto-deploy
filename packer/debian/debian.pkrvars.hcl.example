@@ -1,0 +1,25 @@
+proxmox_url      = "https://TON-IP:8006/api2/json"
+proxmox_username = "packer@pve!TON-TOKEN-ID"
+proxmox_token    = "TON-TOKEN-SECRET"
+proxmox_node     = "pve"
+bind_address   = "IP_MACHINE_DEPLOYEMENT"
+
+vm_id            = 9000
+vm_name          = "debian-12-golden"
+vm_cores         = 1
+vm_memory        = 2048
+vm_disk_size     = "20G"
+vm_storage_pool  = "local-lvm"
+vm_bridge        = "vmbr0"
+vm_profile       = "base"
+
+iso_storage_pool = "local"
+iso_file         = "local:iso/debian-12.X.0-amd64-netinst.iso"
+iso_checksum     = "sha512:d74c4b39b6ed0a0bf19b9a8ea261dfb4871c31554a1aa0452cf14aa2784130bfdd070d5293a71570337b1f958a2b57ba077270bd224eed537ac48f492d35afe8"
+
+locale           = "fr_FR.UTF-8"
+timezone         = "Europe/Paris"
+keyboard         = "fr"
+
+ssh_username     = "packer"
+ssh_public_key   = "ssh-rsa AAAA... user@host"

@@ -1,0 +1,186 @@
+#_preseed_V1
+# ============================================================
+# preseed.cfg.pkrtpl — Debian 12 Bookworm
+# Projet  : proxmox-auto-deploy
+# Usage   : Template Packer — variables injectées via templatefile()
+# landry SOSSA
+# Variables disponibles :
+#   ${locale}         → fr_FR.UTF-8
+#   ${keyboard}       → fr
+#   ${timezone}       → Europe/Paris
+#   ${ssh_public_key} → contenu de packer_id_rsa.pub
+# ============================================================
+
+# ============================================================
+# SECTION 1 — LOCALISATION
+# ============================================================
+
+d-i debian-installer/locale     string ${locale}
+d-i debian-installer/language   string fr
+d-i debian-installer/country    string FR
+
+d-i localechooser/supported-locales multiselect fr_FR.UTF-8, en_US.UTF-8
+
+d-i keyboard-configuration/xkb-keymap        select ${keyboard}
+d-i keyboard-configuration/toggle            select No toggling
+d-i console-keymaps-at/keymap                select fr-latin9
+d-i debian-installer/keymap                  string fr-latin9
+
+# ============================================================
+# SECTION 2 — RÉSEAU
+# DHCP pendant le build — cloud-init gère le vrai adressage
+# ============================================================
+
+d-i netcfg/choose_interface       select auto
+d-i netcfg/link_wait_timeout      string 5
+d-i netcfg/dhcp_timeout           string 60
+
+# Hostname temporaire — sera écrasé par cloud-init
+d-i netcfg/get_hostname           string packer-build
+d-i netcfg/get_domain             string local
+
+d-i netcfg/wireless_wep           string
+d-i hw-detect/load_firmware       boolean false
+
+# ============================================================
+# SECTION 3 — MIROIR APT
+# Miroir officiel Debian — stable et fiable
+# ============================================================
+
+d-i mirror/country                string manual
+d-i mirror/http/hostname          string deb.debian.org
+d-i mirror/http/directory         string /debian
+d-i mirror/http/proxy             string
+d-i mirror/suite                  string bookworm
+
+# ============================================================
+# SECTION 4 — COMPTES UTILISATEURS
+#
+# root désactivé — bonne pratique ANSSI
+# user "packer" créé uniquement pour le build
+# cloud-init créera le vrai admin au déploiement
+# Ansible supprimera "packer" en dernière étape
+# ============================================================
+
+d-i passwd/root-login             boolean false
+d-i passwd/make-user              boolean true
+d-i passwd/user-fullname          string Packer Build User
+d-i passwd/username               string packer
+
+# Mot de passe hashé SHA-512
+# Générer avec : openssl passwd -6 "ton-mot-de-passe"
+# Ce mot de passe est inutile en pratique car on utilise
+# uniquement la clé SSH pour se connecter
+d-i passwd/user-password-crypted  password $6$7QothTROazrFEmnw$hbillXLa57I6r7xiMg5Lv/qbJc0AHdxCEu667ok9P15qsR4YpCzYNh1vyxllK6vE.oyyitrJcS.1.n5uVgMIf/
+
+d-i passwd/user-default-groups    string
+
+# ============================================================
+# SECTION 5 — HORLOGE ET FUSEAU HORAIRE
+# ============================================================
+
+d-i clock-setup/utc               boolean true
+d-i time/zone                     string ${timezone}
+d-i clock-setup/ntp               boolean true
+d-i clock-setup/ntp-server        string 0.debian.pool.ntp.org
+
+# ============================================================
+# SECTION 6 — PARTITIONNEMENT
+#
+# LVM automatique — recette atomic
+# Tout dans / — simple pour un template de base
+# Les profils spécialisés (webserver, database)
+# auront leurs propres recettes dans une prochaine étape
+# ============================================================
+
+# Premier disque disponible automatiquement
+d-i partman-auto/disk             string /dev/sda
+
+# Méthode LVM
+d-i partman-auto/method           string lvm
+
+# Tout l'espace disque pour le VG
+d-i partman-auto-lvm/guided_size  string max
+
+# Nom du volume group
+d-i partman-auto-lvm/new_vg_name  string vg0
+
+# Suppression silencieuse d'un LVM existant
+d-i partman-lvm/device_remove_lvm         boolean true
+d-i partman-md/device_remove_md           boolean true
+d-i partman-lvm/confirm                   boolean true
+d-i partman-lvm/confirm_nooverwrite       boolean true
+
+# Recette atomic — tout dans /
+d-i partman-auto/choose_recipe            select atomic
+
+# Confirmation automatique sans interaction
+d-i partman-partitioning/confirm_write_new_label  boolean true
+d-i partman/choose_partition                      select finish
+d-i partman/confirm                               boolean true
+d-i partman/confirm_nooverwrite                   boolean true
+
+# ============================================================
+# SECTION 7 — SÉLECTION DES PAQUETS
+#
+# Minimum vital pour :
+# - SSH        → accès Packer + Ansible
+# - sudo       → exécution scripts sans mot de passe
+# - python3    → requis par Ansible
+# - qemu-guest-agent → requis par Proxmox
+# - cloud-init → gestion utilisateurs/réseau au déploiement
+# ============================================================
+
+d-i pkgsel/run_tasksel            boolean false
+
+d-i pkgsel/include                string \
+    openssh-server \
+    sudo \
+    curl \
+    ca-certificates \
+    python3 \
+    qemu-guest-agent \
+    cloud-init \
+    cloud-utils
+
+# Pas de mise à jour pendant l'install — Ansible s'en charge
+d-i pkgsel/upgrade                select none
+
+popularity-contest popularity-contest/participate boolean false
+d-i apt-setup/cdrom/set-first     boolean false
+
+# ============================================================
+# SECTION 8 — BOOTLOADER
+# ============================================================
+
+d-i grub-installer/only_debian    boolean true
+d-i grub-installer/with_other_os  boolean true
+d-i grub-installer/bootdev        string default
+
+# ============================================================
+# SECTION 9 — LATE COMMAND
+#
+# Exécuté juste avant la fin de l'installation
+# Configure l'accès SSH pour Packer avec la clé publique
+# La variable ${ssh_public_key} est injectée par templatefile()
+# ============================================================
+
+d-i preseed/late_command string \
+    in-target mkdir -p /home/packer/.ssh ; \
+    in-target chmod 700 /home/packer/.ssh ; \
+    in-target bash -c "echo '${ssh_public_key}' > /home/packer/.ssh/authorized_keys" ; \
+    in-target chmod 600 /home/packer/.ssh/authorized_keys ; \
+    in-target chown -R packer:packer /home/packer/.ssh ; \
+    in-target bash -c "echo 'packer ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/packer" ; \
+    in-target chmod 440 /etc/sudoers.d/packer ; \
+    in-target sed -i 's/^#*PasswordAuthentication.*/PasswordAuthentication no/' /etc/ssh/sshd_config ; \
+    in-target sed -i 's/^#*PubkeyAuthentication.*/PubkeyAuthentication yes/' /etc/ssh/sshd_config ; \
+    in-target systemctl enable qemu-guest-agent ; \
+    in-target systemctl enable ssh ; \
+    in-target systemctl enable cloud-init
+
+# ============================================================
+# SECTION 10 — FIN D'INSTALLATION
+# ============================================================
+
+d-i finish-install/reboot_in_progress note

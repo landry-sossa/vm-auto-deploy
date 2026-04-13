@@ -1,0 +1,59 @@
+# ============================================================
+# config.yml.example — Configuration du pipeline
+# Projet  : proxmox-auto-deploy
+#
+# INSTRUCTIONS :
+#   1. Copier ce fichier : cp config.yml.example config.yml
+#   2. Remplir config.yml avec tes valeurs
+#   3. Ne jamais committer config.yml (dans .gitignore)
+#
+# Les secrets (tokens, clés SSH) vont dans GitHub Secrets
+# Voir README.md pour la liste complète des secrets requis
+# ============================================================
+
+proxmox:
+  node:          "NOM-DU-NOEUD"       # ex: pve
+  storage:       "NOM-DU-STORAGE"     # ex: local-lvm
+  bridge_build:  "BRIDGE-BUILD"       # ex: vmbr0 (réseau des VMs)
+  bridge_deploy: "BRIDGE-DEPLOY"      # ex:  (réseau des VMs)
+
+packer:
+  vm_id:      0000                    # ex: 9000 (ID du template)
+  vm_name:    "NOM-DU-TEMPLATE"       # ex: debian-12-golden
+  vm_cores:   0                       # ex: 1
+  vm_memory:  0000                    # ex: 2048 (en MB)
+  vm_disk:    "0G"                    # ex: 20G
+  iso_file:   "STORAGE:iso/NOM.iso"   # ex: local:iso/debian-12.13.0-amd64-netinst.iso
+  locale:     "LOCALE"                # ex: fr_FR.UTF-8
+  timezone:   "TIMEZONE"              # ex: Europe/Paris
+  keyboard:   "KEYBOARD"              # ex: fr
+
+terraform:
+  vm_id:      000                     # ex: 100 (ID de la VM déployée)
+  vm_name:    "NOM-DE-LA-VM"          # ex: debian-vm-01
+  vm_cores:   0                       # ex: 1
+  vm_memory:  0000                    # ex: 2048 (en MB)
+  vm_disk:    00                      # ex: 20 (en GB)
+  vm_ip:      "X.X.X.X/XX"           # ex: 10.10.0.20/24
+  vm_gateway: "X.X.X.X"              # ex: 10.10.0.1 (IP OPNsense)
+  vm_dns:     "X.X.X.X"              # ex: 1.1.1.1
+
+ansible:
+  anssi_profile: "PROFIL-ANSSI"       # ex: anssi_bp28_minimal
+                                      #     anssi_bp28_intermediary
+                                      #     anssi_bp28_enhanced
+                                      #     anssi_bp28_high
+  ssg_version:   "X.X.XX"            # ex: 0.1.79
+
+# ============================================================
+# SECRETS GITHUB ACTIONS REQUIS
+# Configurer dans Settings → Secrets → Actions
+# ============================================================
+# PROXMOX_URL            → ex: https://192.168.1.X:8006/api2/json
+# PROXMOX_USERNAME       → ex: packer@pve!packer-token
+# PROXMOX_TOKEN          → secret du token Packer
+# TERRAFORM_API_TOKEN    → ex: terraform@pve!terraform-token=secret
+# ISO_CHECKSUM           → ex: sha512:xxxxxxx...
+# PACKER_SSH_PUBLIC_KEY  → contenu de packer_id_rsa.pub
+# PACKER_SSH_PRIVATE_KEY → contenu de packer_id_rsa
+# RUNNER_IP              → ex: 192.168.1.X (IP du self-hosted runner)

@@ -1,0 +1,22 @@
+# Packer
+*.pkrvars.hcl
+!*.pkrvars.hcl.example
+packer_cache/
+
+# Terraform
+terraform.tfvars
+*.tfstate
+*.tfstate.backup
+.terraform/
+.terraform.lock.hcl
+
+# Pipeline
+pipeline/config.yml
+!pipeline/config.yml.example
+
+# Ansible
+ansible/reports/*.html
+ansible/reports/*.xml
+
+# Logs
+*.log
