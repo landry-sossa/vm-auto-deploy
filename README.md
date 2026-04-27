@@ -80,7 +80,7 @@ ssh-keygen -t rsa -b 4096 `
 
 ### 5. Utilisation locale
 
-#### Packer — Construire le template
+#### Packer - Construire le template
 
 ```bash
 cd packer/debian
@@ -89,7 +89,7 @@ packer validate -var-file="debian.pkrvars.hcl" debian.pkr.hcl
 packer build -var-file="debian.pkrvars.hcl" debian.pkr.hcl
 ```
 
-#### Terraform — Déployer une VM
+#### Terraform - Déployer une VM
 
 ```bash
 cd terraform
@@ -98,7 +98,7 @@ terraform plan -var-file="terraform.tfvars"
 terraform apply -var-file="terraform.tfvars"
 ```
 
-#### Ansible — Appliquer la conformité ANSSI
+#### Ansible - Appliquer la conformité ANSSI
 
 ```bash
 cd ansible
@@ -132,6 +132,24 @@ git push origin main
 
 Le pipeline se déclenche automatiquement.
 
+```md id="w9pxfj"
+## Roadmap
+
+### Fonctionnalités actuelles
+- [x] Déploiement automatique de VM Debian sur Proxmox
+- [x] Configuration initiale automatisée
+- [x] Publication du projet en open source
+
+### Évolutions prévues
+- [ ] Ajouter le support Ubuntu
+- [ ] Ajouter le support CentOS / RedHat
+- [ ] Améliorer la sécurité des VM déployées
+- [ ] Ajouter le support d'autres environnements de virtualisation
+- [ ] Préparer une extension vers des environnements cloud
+- [ ] Ajouter une documentation plus détaillée
+```
+
+
 ## Structure du projet
 
 ## Licence
@@ -142,3 +160,5 @@ Voir le fichier [LICENSE](LICENSE) pour plus de détails.
 ## Auteur
 
 Landry SOSSA 
+
+
